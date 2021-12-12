@@ -1,4 +1,9 @@
 /*
+* Copyright (C) 2014 MediaTek Inc.
+* Modification based on code covered by the mentioned copyright
+* and/or permission notice(s).
+*/
+/*
 
 Copyright (c) 2008, The Android Open Source Project
 All rights reserved.
@@ -42,6 +47,8 @@ SUCH DAMAGE.
 #include <sys/stat.h>
 #include <utils/Log.h>
 
+#include <pthread.h>
+#include <semaphore.h>
 #include "jhead.h"
 
 #ifndef NELEM
@@ -54,6 +61,21 @@ SUCH DAMAGE.
 // Various tests
 #undef REALLOCTEST
 #undef OUTOFMEMORYTEST1
+static pthread_mutex_t jheadMutex = PTHREAD_MUTEX_INITIALIZER;
+
+JavaVM* jvm;
+static jobject       jpegStream;
+static jmethodID    streamReadId;
+static jmethodID    streamSkipId;
+jbyteArray js_buf;
+int js_pos;
+int js_valid;//valid number counted from js_pos(include js_pos);
+
+extern int ReadJpegStream(ReadMode_t ReadMode, CALLBACK_js_getc, CALLBACK_js_read);
+int js_getc();
+int js_read(void* ptr,size_t size,size_t count) ;
+static char* composeAttributes();
+
 
 static void addExifAttibute(JNIEnv *env, jmethodID putMethod, jobject hashMap, char* key, char* value) {
     jstring jkey = (*env)->NewStringUTF(env, key);
@@ -410,6 +432,7 @@ static jboolean appendThumbnail(JNIEnv *env, jobject jobj, jstring jfilename, js
      ALOGE("*******before actual call to ReplaceThumbnail\n");
      ShowImageInfo(TRUE);
  #endif
+    pthread_mutex_lock(&jheadMutex);
     ReplaceThumbnail(thumbnailfilename);
  #ifdef SUPERDEBUG
      ShowImageInfo(TRUE);
@@ -418,6 +441,7 @@ static jboolean appendThumbnail(JNIEnv *env, jobject jobj, jstring jfilename, js
     (*env)->ReleaseStringUTFChars(env, jthumbnailfilename, thumbnailfilename);
 
     DiscardData();
+    pthread_mutex_unlock(&jheadMutex);
     return JNI_TRUE;
 }
 
@@ -428,8 +452,10 @@ static void commitChanges(JNIEnv *env, jobject jobj, jstring jfilename)
 #endif
     const char* filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
     if (filename) {
+        pthread_mutex_lock(&jheadMutex);
         saveJPGFile(filename);
         DiscardData();
+        pthread_mutex_unlock(&jheadMutex);
         (*env)->ReleaseStringUTFChars(env, jfilename, filename);
     }
 }
@@ -441,6 +467,7 @@ static jbyteArray getThumbnail(JNIEnv *env, jobject jobj, jstring jfilename)
 #endif
 
     const char* filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+    pthread_mutex_lock(&jheadMutex);
     if (filename) {
         loadExifInfo(filename, FALSE);
         Section_t* ExifSection = FindSection(M_EXIF);
@@ -466,6 +493,7 @@ static jbyteArray getThumbnail(JNIEnv *env, jobject jobj, jstring jfilename)
 #endif
         (*env)->ReleaseStringUTFChars(env, jfilename, filename);
         DiscardData();
+        pthread_mutex_unlock(&jheadMutex);
         return byteArray;
     }
 noThumbnail:
@@ -473,6 +501,7 @@ noThumbnail:
         (*env)->ReleaseStringUTFChars(env, jfilename, filename);
     }
     DiscardData();
+    pthread_mutex_unlock(&jheadMutex);
     return NULL;
 }
 
@@ -561,6 +590,7 @@ static int addKeyValueRational(char** buf, int bufLen, const char* key, rat_t va
     return addKeyValueString(buf, bufLen, key, valueStr);
 }
 
+#if 0
 static jstring getAttributes(JNIEnv *env, jobject jobj, jstring jfilename)
 {
 #ifdef SUPERDEBUG
@@ -766,12 +796,400 @@ static jstring getAttributes(JNIEnv *env, jobject jobj, jstring jfilename)
     DiscardData();
     return result;
 }
+#endif
+//modified by MTK
+static jstring getAttributes(JNIEnv *env, jobject jobj, jstring jfilename)
+{
+#ifdef SUPERDEBUG
+    ALOGE("******************************** getAttributes\n");
+#endif
+    pthread_mutex_lock(&jheadMutex);
+    const char* filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+    loadExifInfo(filename, FALSE);
+#ifdef SUPERDEBUG
+    ShowImageInfo(TRUE);
+#endif
+    (*env)->ReleaseStringUTFChars(env, jfilename, filename);
+    char* finalResult = composeAttributes();
+#ifdef SUPERDEBUG
+    ALOGE("*********Returning result \"%s\"", finalResult);
+#endif
+    jstring result = ((*env)->NewStringUTF(env, finalResult));
+    free(finalResult);
+    DiscardData();
+    pthread_mutex_unlock(&jheadMutex);
+    return result;
+}
+
+//add by MTK begin
+static int loadExifInfoFromStream(int readJPG) {
+#ifdef SUPERDEBUG
+    ALOGE("loadExifInfoFromStream");
+#endif
+    int Modified = FALSE;
+    ReadMode_t ReadMode = READ_METADATA;
+#ifdef SUPERDEBUG
+    ALOGE("ResetJpgfile");
+#endif
+    ResetJpgfile();
+    memset(&ImageInfo, 0, sizeof(ImageInfo));
+    ImageInfo.FlashUsed = -1;
+    ImageInfo.MeteringMode = -1;
+    ImageInfo.Whitebalance = -1;
+#ifdef SUPERDEBUG
+    ALOGE("ReadJpegStream");
+#endif
+    return ReadJpegStream(ReadMode, js_getc, js_read);
+}
+
+int js_getc() {
+    JNIEnv *env = NULL;
+    (*jvm)->GetEnv(jvm, (void**) &env, JNI_VERSION_1_4);
+    if (js_valid > 0) {
+        int result;
+        (*env)->GetByteArrayRegion(env,js_buf, js_pos, 1,
+                                    (jbyte*)(&result));
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+            return EOF;
+        }
+        js_pos++;
+        js_valid--;
+        return result&0xff;
+    } else {
+        js_valid = (*env)->CallIntMethod(env,jpegStream,streamReadId, js_buf, 0, 1024);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+            return EOF;
+        }
+        if (js_valid <= 0) {
+            return EOF;
+        }
+        js_pos = 0;
+        return js_getc();
+    }
+}
+int js_read_internal(void* ptr,int wanted) {
+    JNIEnv *env = NULL;
+    (*jvm)->GetEnv(jvm, (void**) &env, JNI_VERSION_1_4);
+    if (js_valid >= wanted) {
+        (*env)->GetByteArrayRegion(env,js_buf, js_pos, wanted,
+                                         (jbyte*)(ptr));
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+            return 0;
+        }
+        js_pos += wanted;
+        js_valid-=wanted;
+        return wanted;
+    } else {
+        int num = 0;
+        if (js_valid > 0) {
+        (*env)->GetByteArrayRegion(env,js_buf, js_pos, js_valid,
+                                          (jbyte*)(ptr));
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionDescribe(env);
+                (*env)->ExceptionClear(env);
+                return 0;
+            }
+            num += js_valid;
+            wanted -= js_valid;
+            js_valid = 0;
+            js_pos = 0;
+        }
+        while (wanted > 0) {
+        int num1,num2 = wanted;
+        if (num2 > 1024) {
+            num2 = 1024;
+        }
+        num1 = (*env)->CallIntMethod(env,jpegStream,streamReadId, js_buf,0, num2);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionDescribe(env);
+                (*env)->ExceptionClear(env);
+                break;
+            }
+            if (num1 <= 0) {
+            break;
+            }
+            (*env)->GetByteArrayRegion(env,js_buf, 0, num1,
+                                         ((jbyte*)ptr+num));
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionDescribe(env);
+                (*env)->ExceptionClear(env);
+                break;
+            }
+            num += num1;
+            wanted -= num1;
+        }
+        return num;
+    }
+}
+int js_read(void* ptr,size_t size,size_t count) {
+    int wanted = size * count;
+    int result = js_read_internal(ptr,wanted)/size;
+    if (result == 0) {
+        result = EOF;
+    }
+    return result;
+}
+
+// returns new buffer length
+static int addKeyValueULong(char** buf, int bufLen, const char* key, unsigned int value) {
+    char valueStr[20];
+    snprintf(valueStr, 20, "%u", value);
+
+    return addKeyValueString(buf, bufLen, key, valueStr);
+}
+
+static char* composeAttributes() {
+    attributeCount = 0;
+#ifdef REALLOCTEST
+    int bufLen = 5;
+#else
+    int bufLen = 1000;
+#endif
+    char* buf = malloc(bufLen);
+    if (buf == NULL) {
+        return NULL;
+    }
+    *buf = 0;   // start the string out at zero length
+
+    // save a fake "hasThumbnail" tag to pass to the java ExifInterface
+    bufLen = addKeyValueString(&buf, bufLen, "hasThumbnail",
+        ImageInfo.ThumbnailOffset == 0 || ImageInfo.ThumbnailAtEnd == FALSE || ImageInfo.ThumbnailSize == 0 ?
+            "false" : "true");
+    if (bufLen == 0) return NULL;
+
+    if (ImageInfo.CameraMake[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "Make", ImageInfo.CameraMake);
+        if (bufLen == 0) return NULL;
+    }
+    if (ImageInfo.CameraModel[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "Model", ImageInfo.CameraModel);
+        if (bufLen == 0) return NULL;
+    }
+    if (ImageInfo.DateTime[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "DateTime", ImageInfo.DateTime);
+        if (bufLen == 0) return NULL;
+    }
+    if (ImageInfo.DigitizedTime[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "DateTimeDigitized", ImageInfo.DigitizedTime);
+        if (bufLen == 0) return NULL;
+    }
+    if (ImageInfo.SubSecTime[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "SubSecTime", ImageInfo.SubSecTime);
+        if (bufLen == 0) return NULL;
+    }
+    if (ImageInfo.SubSecTimeOrig[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "SubSecTimeOriginal", ImageInfo.SubSecTimeOrig);
+        if (bufLen == 0) return NULL;
+    }
+    if (ImageInfo.SubSecTimeDig[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "SubSecTimeDigitized", ImageInfo.SubSecTimeDig);
+        if (bufLen == 0) return NULL;
+    }
+
+    bufLen = addKeyValueInt(&buf, bufLen, "ImageWidth", ImageInfo.Width);
+    if (bufLen == 0) return NULL;
+
+    bufLen = addKeyValueInt(&buf, bufLen, "ImageLength", ImageInfo.Height);
+    if (bufLen == 0) return NULL;
+
+    bufLen = addKeyValueInt(&buf, bufLen, "Orientation", ImageInfo.Orientation);
+    if (bufLen == 0) return NULL;
+    if(ImageInfo.MTKConshotGroupID){
+       bufLen = addKeyValueULong(&buf, bufLen, "MTKConshotGroupID", ImageInfo.MTKConshotGroupID);
+       if (bufLen == 0) return NULL;
+    }
+    if(ImageInfo.MTKConshotPicIndex){
+       bufLen = addKeyValueInt(&buf, bufLen, "MTKConshotPicIndex", ImageInfo.MTKConshotPicIndex);
+       if (bufLen == 0) return NULL;
+    }
+    if(ImageInfo.MTKConshotFocusHigh){
+       bufLen = addKeyValueULong(&buf, bufLen, "MTKConshotFocusHigh", ImageInfo.MTKConshotFocusHigh);
+       if (bufLen == 0) return NULL;
+    }
+    if(ImageInfo.MTKConshotFocusLow){
+       bufLen = addKeyValueULong(&buf, bufLen, "MTKConshotFocusLow", ImageInfo.MTKConshotFocusLow);
+       if (bufLen == 0) return NULL;
+    }
+    if (ImageInfo.MTKCameraRefocus[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "MTKCameraRefocus", ImageInfo.MTKCameraRefocus);
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.FlashUsed >= 0) {
+        bufLen = addKeyValueInt(&buf, bufLen, "Flash", ImageInfo.FlashUsed);
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.FocalLength.num != 0 && ImageInfo.FocalLength.denom != 0) {
+        bufLen = addKeyValueRational(&buf, bufLen, "FocalLength", ImageInfo.FocalLength);
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.DigitalZoomRatio > 1.0){
+        // Digital zoom used.  Shame on you!
+        bufLen = addKeyValueDouble(&buf, bufLen, "DigitalZoomRatio", ImageInfo.DigitalZoomRatio, "%1.3f");
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.ExposureTime){
+        const char* format;
+        if (ImageInfo.ExposureTime < 0.010){
+            format = "%6.4f";
+        } else {
+            format = "%5.3f";
+        }
+
+        bufLen = addKeyValueDouble(&buf, bufLen, "ExposureTime", (double)ImageInfo.ExposureTime, format);
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.ApertureFNumber){
+        bufLen = addKeyValueDouble(&buf, bufLen, "FNumber", (double)ImageInfo.ApertureFNumber, "%3.1f");
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.Distance){
+        bufLen = addKeyValueDouble(&buf, bufLen, "SubjectDistance", (double)ImageInfo.Distance, "%4.2f");
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.ISOequivalent){
+        bufLen = addKeyValueInt(&buf, bufLen, "ISOSpeedRatings", ImageInfo.ISOequivalent);
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.ExposureBias){
+        // If exposure bias was specified, but set to zero, presumably its no bias at all,
+        // so only show it if its nonzero.
+        bufLen = addKeyValueDouble(&buf, bufLen, "ExposureBiasValue", (double)ImageInfo.ExposureBias, "%4.2f");
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.Whitebalance >= 0) {
+        bufLen = addKeyValueInt(&buf, bufLen, "WhiteBalance", ImageInfo.Whitebalance);
+        if (bufLen == 0) return NULL;
+    }
+
+    bufLen = addKeyValueInt(&buf, bufLen, "LightSource", ImageInfo.LightSource);
+    if (bufLen == 0) return NULL;
+
+
+    if (ImageInfo.MeteringMode) {
+        bufLen = addKeyValueInt(&buf, bufLen, "MeteringMode", ImageInfo.MeteringMode);
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.ExposureProgram) {
+        bufLen = addKeyValueInt(&buf, bufLen, "ExposureProgram", ImageInfo.ExposureProgram);
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.ExposureMode) {
+        bufLen = addKeyValueInt(&buf, bufLen, "ExposureMode", ImageInfo.ExposureMode);
+        if (bufLen == 0) return NULL;
+    }
+
+    if (ImageInfo.GpsInfoPresent) {
+        if (ImageInfo.GpsLatRaw[0]) {
+            bufLen = addKeyValueString(&buf, bufLen, "GPSLatitude", ImageInfo.GpsLatRaw);
+            if (bufLen == 0) return NULL;
+        }
+        if (ImageInfo.GpsLatRef[0]) {
+            bufLen = addKeyValueString(&buf, bufLen, "GPSLatitudeRef", ImageInfo.GpsLatRef);
+            if (bufLen == 0) return NULL;
+        }
+        if (ImageInfo.GpsLongRaw[0]) {
+            bufLen = addKeyValueString(&buf, bufLen, "GPSLongitude", ImageInfo.GpsLongRaw);
+            if (bufLen == 0) return NULL;
+        }
+        if (ImageInfo.GpsLongRef[0]) {
+            bufLen = addKeyValueString(&buf, bufLen, "GPSLongitudeRef", ImageInfo.GpsLongRef);
+            if (bufLen == 0) return NULL;
+        }
+        if (ImageInfo.GpsAlt[0]) {
+            bufLen = addKeyValueRational(&buf, bufLen, "GPSAltitude", ImageInfo.GpsAltRaw);
+            bufLen = addKeyValueInt(&buf, bufLen, "GPSAltitudeRef", ImageInfo.GpsAltRef);
+            if (bufLen == 0) return NULL;
+        }
+        if (ImageInfo.GpsDateStamp[0]) {
+            bufLen = addKeyValueString(&buf, bufLen, "GPSDateStamp", ImageInfo.GpsDateStamp);
+            if (bufLen == 0) return NULL;
+        }
+        if (ImageInfo.GpsTimeStamp[0]) {
+            bufLen = addKeyValueString(&buf, bufLen, "GPSTimeStamp", ImageInfo.GpsTimeStamp);
+            if (bufLen == 0) return NULL;
+        }
+        if (ImageInfo.GpsProcessingMethod[0]) {
+            bufLen = addKeyValueString(&buf, bufLen, "GPSProcessingMethod", ImageInfo.GpsProcessingMethod);
+            if (bufLen == 0) return NULL;
+        }
+    }
+
+    if (ImageInfo.Comments[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "UserComment", ImageInfo.Comments);
+        if (bufLen == 0) return NULL;
+    }
+
+    // put the attribute count at the beginnnig of the string
+    int finalBufLen = strlen(buf) + 20;
+    char* finalResult = malloc(finalBufLen);
+    if (finalResult == NULL) {
+        free(buf);
+        return NULL;
+    }
+    snprintf(finalResult, finalBufLen, "%d %s", attributeCount, buf);
+    int k;
+    for (k = 0; k < finalBufLen; k++)
+        if (!isascii(finalResult[k]))
+            finalResult[k] = '?';
+    free(buf);
+        return finalResult;
+
+}
+
+static jstring getAttributesFromStream(JNIEnv *env, jobject jobj,jobject stream,jbyteArray buf)
+{
+#ifdef SUPERDEBUG
+    ALOGE("******************************** getAttributesFromStream\n");
+#endif
+    jpegStream = stream;
+    js_buf = buf;
+    if (js_buf == NULL) {
+        return NULL;
+    }
+    js_valid = (*env)->CallIntMethod(env,jpegStream,streamReadId, js_buf, 0, 1024);
+    if (js_valid <= 0) {
+        return NULL;
+    }
+    js_pos = 0;
+    pthread_mutex_lock(&jheadMutex);
+    loadExifInfoFromStream(FALSE);
+#ifdef SUPERDEBUG
+    ShowImageInfo(TRUE);
+#endif
+    char* finalResult = composeAttributes();
+#ifdef SUPERDEBUG
+    ALOGE("*********Returning result \"%s\"", finalResult);
+#endif
+    jstring result = ((*env)->NewStringUTF(env, finalResult));
+    free(finalResult);
+    DiscardData();
+    pthread_mutex_unlock(&jheadMutex);
+    return result;
+}
 
 static const char *classPathName = "android/media/ExifInterface";
 
 static JNINativeMethod methods[] = {
   {"saveAttributesNative", "(Ljava/lang/String;Ljava/lang/String;)V", (void*)saveAttributes },
   {"getAttributesNative", "(Ljava/lang/String;)Ljava/lang/String;", (void*)getAttributes },
+  {"getAttributesFromStreamNative", "(Ljava/io/InputStream;[B)Ljava/lang/String;", (void*)getAttributesFromStream},
   {"appendThumbnailNative", "(Ljava/lang/String;Ljava/lang/String;)Z", (void*)appendThumbnail },
   {"commitChangesNative", "(Ljava/lang/String;)V", (void*)commitChanges },
   {"getThumbnailNative", "(Ljava/lang/String;)[B", (void*)getThumbnail },
@@ -832,6 +1250,15 @@ __attribute__ ((visibility("default"))) jint JNI_OnLoad(JavaVM* vm, void* reserv
         goto bail;
     }
 
+    jvm = vm;
+    jclass clazz = (*env)->FindClass(env,"java/io/InputStream");
+    if (clazz == NULL) {
+        fprintf(stderr,
+            "JNI_OnLoad unable to find class java.io.InputStream \n");
+        return JNI_FALSE;
+    }
+    streamReadId = (*env)->GetMethodID(env,clazz,"read", "([BII)I");
+    streamSkipId = (*env)->GetMethodID(env,clazz,"skip", "(J)J");
     /* success -- return valid version number */
     result = JNI_VERSION_1_4;
 

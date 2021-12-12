@@ -116,6 +116,11 @@ const int BytesPerFormat[] = {0,1,1,2,4,8,1,1,2,4,8,4,8};
 #define TAG_Y_CB_CR_SUB_SAMPLING   0x0212
 #define TAG_Y_CB_CR_POSITIONING    0x0213
 #define TAG_REFERENCE_BLACK_WHITE  0x0214
+#define TAG_MTK_CONSHOT_PIC_INDEX  0x0220   //MTK_Continuous_Shot_Feature_Picture_Index
+#define TAG_MTK_CONSHOT_GROUP_ID   0x0221   //MTK_Continuous_Shot_Feature_Group_ID
+#define TAG_MTK_CONSHOT_FOCUS_HIGH 0x0222   //MTK_Continuous_Shot_Feature_Focus_High
+#define TAG_MTK_CONSHOT_FOCUS_LOW  0x0223   //MTK_Continuous_Shot_Feature_Focus_Low
+#define TAG_MTK_CAMERA_REFOCUS     0x0225   //MTK_Camera_Refocus
 #define TAG_RELATED_IMAGE_WIDTH    0x1001
 #define TAG_RELATED_IMAGE_LENGTH   0x1002
 #define TAG_CFA_REPEAT_PATTERN_DIM 0x828D
@@ -225,6 +230,11 @@ static const TagTable_t TagTable[] = {
   { TAG_Y_CB_CR_SUB_SAMPLING,   "YCbCrSubSampling", FMT_USHORT, 2},
   { TAG_Y_CB_CR_POSITIONING,    "YCbCrPositioning", FMT_USHORT, 1},
   { TAG_REFERENCE_BLACK_WHITE,  "ReferenceBlackWhite", FMT_SRATIONAL, 6},
+  { TAG_MTK_CONSHOT_PIC_INDEX,  "MTKConshotPicIndex", FMT_USHORT, 1},
+  { TAG_MTK_CONSHOT_GROUP_ID ,  "MTKConshotGroupID", FMT_ULONG, 1},
+  { TAG_MTK_CONSHOT_FOCUS_HIGH,  "MTKConshotFocusHigh", FMT_ULONG, 1},
+  { TAG_MTK_CONSHOT_FOCUS_LOW ,  "MTKConshotFocusLow", FMT_ULONG, 1},
+  { TAG_MTK_CAMERA_REFOCUS,     "MTKCameraRefocus", FMT_STRING, -1},
   { TAG_RELATED_IMAGE_WIDTH,    "RelatedImageWidth", 0, 0},
   { TAG_RELATED_IMAGE_LENGTH,   "RelatedImageLength", 0, 0},
   { TAG_CFA_REPEAT_PATTERN_DIM, "CFARepeatPatternDim", 0, 0},
@@ -1004,6 +1014,21 @@ static void ProcessExifDir(unsigned char * DirStart, unsigned char * OffsetBase,
                 //   1 = macro, 2 = close, 3 = distant
                 ImageInfo.DistanceRange = (int)ConvertAnyFormat(ValuePtr, Format);
                 break;
+            case TAG_MTK_CONSHOT_PIC_INDEX:
+                ImageInfo.MTKConshotPicIndex = (unsigned int)ConvertAnyFormat(ValuePtr, Format);
+                break;
+            case TAG_MTK_CONSHOT_GROUP_ID :
+                ImageInfo.MTKConshotGroupID = (unsigned int)ConvertAnyFormat(ValuePtr, Format);
+                break;
+            case TAG_MTK_CONSHOT_FOCUS_HIGH:
+                ImageInfo.MTKConshotFocusHigh = (unsigned int)ConvertAnyFormat(ValuePtr, Format);
+                break;
+            case TAG_MTK_CONSHOT_FOCUS_LOW :
+                ImageInfo.MTKConshotFocusLow = (unsigned int)ConvertAnyFormat(ValuePtr, Format);
+                break;
+            case TAG_MTK_CAMERA_REFOCUS :
+                strncpy(ImageInfo.MTKCameraRefocus, (char *)ValuePtr, ByteCount < 31 ? ByteCount : 31);
+                break;
         }
     }
 
@@ -1780,6 +1805,21 @@ void ShowImageInfo(int ShowFileInfo)
         printf("ISO equiv.   : %2d\n",(int)ImageInfo.ISOequivalent);
     }
 
+    if (ImageInfo.MTKConshotGroupID){
+           printf("MTK GroupID  : %2u\n",(unsigned int)ImageInfo.MTKConshotGroupID);
+    }
+    if (ImageInfo.MTKConshotPicIndex){
+           printf("MTK PicIdx   : %2u\n",(unsigned int)ImageInfo.MTKConshotPicIndex);
+    }
+    if (ImageInfo.MTKConshotFocusHigh){
+           printf("MTK FocusHigh: %2u\n",(unsigned int)ImageInfo.MTKConshotFocusHigh);
+    }
+    if (ImageInfo.MTKConshotFocusLow){
+           printf("MTK FocusLow : %2u\n",(unsigned int)ImageInfo.MTKConshotFocusLow);
+    }
+    if (ImageInfo.MTKCameraRefocus[0]) {
+           printf("MTK Refocus: %s\n", ImageInfo.MTKCameraRefocus);
+    }
     if (ImageInfo.ExposureBias){
         // If exposure bias was specified, but set to zero, presumably its no bias at all,
         // so only show it if its nonzero.

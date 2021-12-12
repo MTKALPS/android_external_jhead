@@ -224,7 +224,7 @@ void ProcessGpsInfo(unsigned char * DirStart, int ByteCountUnused, unsigned char
                     Values[a] = ConvertAnyFormat(ValuePtr+a*ComponentSize, Format);
                 }
 
-                sprintf(TempString, FmtString, Values[0], Values[1], Values[2]);
+                snprintf(TempString, sizeof(TempString), FmtString, Values[0], Values[1], Values[2]);
 
                 if (Tag == TAG_GPS_LAT){
                     strncpy(ImageInfo.GpsLat+2, TempString, 29);
@@ -232,7 +232,7 @@ void ProcessGpsInfo(unsigned char * DirStart, int ByteCountUnused, unsigned char
                     strncpy(ImageInfo.GpsLong+2, TempString, 29);
                 }
 
-                sprintf(TempString, "%d/%d,%d/%d,%d/%d",
+                snprintf(TempString, sizeof(TempString), "%d/%d,%d/%d,%d/%d",
                     Get32s(ValuePtr), Get32s(4+(char*)ValuePtr),
                     Get32s(8+(char*)ValuePtr), Get32s(12+(char*)ValuePtr),
                     Get32s(16+(char*)ValuePtr), Get32s(20+(char*)ValuePtr));
@@ -249,7 +249,7 @@ void ProcessGpsInfo(unsigned char * DirStart, int ByteCountUnused, unsigned char
                 break;
 
             case TAG_GPS_ALT:
-                sprintf(ImageInfo.GpsAlt + 1, "%.2fm", 
+                snprintf(ImageInfo.GpsAlt + 1, sizeof(ImageInfo.GpsAlt) - 2, "%.2fm",
                     ConvertAnyFormat(ValuePtr, Format));
                 ImageInfo.GpsAltRaw.num = Get32u(ValuePtr);
                 ImageInfo.GpsAltRaw.denom = Get32u(4+(char *)ValuePtr);
