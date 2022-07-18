@@ -42,6 +42,8 @@ SUCH DAMAGE.
 #include <sys/stat.h>
 #include <utils/Log.h>
 
+#include <pthread.h>
+#include <semaphore.h>
 #include "jhead.h"
 
 #ifndef NELEM
@@ -54,6 +56,7 @@ SUCH DAMAGE.
 // Various tests
 #undef REALLOCTEST
 #undef OUTOFMEMORYTEST1
+static pthread_mutex_t jheadMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void addExifAttibute(JNIEnv *env, jmethodID putMethod, jobject hashMap, char* key, char* value) {
     jstring jkey = (*env)->NewStringUTF(env, key);
@@ -105,6 +108,130 @@ static int loadExifInfo(const char* FileName, int readJPG) {
     return ReadJpegFile(FileName, ReadMode);
 }
 
+       
+extern int ReadJpegStream(ReadMode_t ReadMode, CALLBACK_js_getc, CALLBACK_js_read);
+int js_getc();
+int js_read(void* ptr,size_t size,size_t count) ;
+
+static int loadExifInfoFromStream(int readJPG) {
+#ifdef SUPERDEBUG
+    ALOGE("loadExifInfoFromStream");
+#endif
+	    int Modified = FALSE;
+	    ReadMode_t ReadMode = READ_METADATA;
+#ifdef SUPERDEBUG
+    ALOGE("ResetJpgfile");
+#endif
+    ResetJpgfile();
+    memset(&ImageInfo, 0, sizeof(ImageInfo));
+    ImageInfo.FlashUsed = -1;
+    ImageInfo.MeteringMode = -1;
+    ImageInfo.Whitebalance = -1;
+#ifdef SUPERDEBUG
+    ALOGE("ReadJpegStream");
+#endif
+    return ReadJpegStream(ReadMode, js_getc, js_read);
+}
+JavaVM* jvm;
+static jobject       jpegStream;
+static jmethodID    streamReadId;
+static jmethodID    streamSkipId;
+jbyteArray js_buf;
+int js_pos;
+int js_valid;//valid number counted from js_pos(include js_pos);
+int js_getc() {
+	JNIEnv *env = NULL;
+	(*jvm)->GetEnv(jvm, (void**) &env, JNI_VERSION_1_4);	
+	if (js_valid > 0) {
+		int result;
+		(*env)->GetByteArrayRegion(env,js_buf, js_pos, 1,
+                                    (jbyte*)(&result));
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+            return EOF;
+        }		
+		js_pos++;
+		js_valid--;	
+		return result&0xff;
+	} else {
+		js_valid = (*env)->CallIntMethod(env,jpegStream,streamReadId, js_buf, 0, 1024);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+            return EOF;
+        }	
+		if (js_valid <= 0) {
+			return EOF;
+		} 
+		js_pos = 0;
+		return js_getc();
+	} 
+}
+int js_read_internal(void* ptr,int wanted) {
+	JNIEnv *env = NULL;
+	(*jvm)->GetEnv(jvm, (void**) &env, JNI_VERSION_1_4);		
+	if (js_valid >= wanted) {
+		(*env)->GetByteArrayRegion(env,js_buf, js_pos, wanted,
+		                                    (jbyte*)(ptr));		
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+            return 0;
+        }			
+		js_pos += wanted;		
+		js_valid-=wanted;
+		return wanted;
+	} else {
+		int num = 0;
+		if (js_valid > 0) {
+			(*env)->GetByteArrayRegion(env,js_buf, js_pos, js_valid,
+												(jbyte*)(ptr)); 
+	        if ((*env)->ExceptionCheck(env)) {
+	            (*env)->ExceptionDescribe(env);
+	            (*env)->ExceptionClear(env);
+	            return 0;
+	        }				
+			num += js_valid;
+			wanted -= js_valid;
+			js_valid = 0;			
+			js_pos = 0;			
+		}
+		while (wanted > 0) {
+			int num1,num2 = wanted;
+			if (num2 > 1024) {
+				num2 = 1024;
+			}
+			num1 = (*env)->CallIntMethod(env,jpegStream,streamReadId, js_buf,0, num2);
+	        if ((*env)->ExceptionCheck(env)) {
+	            (*env)->ExceptionDescribe(env);
+	            (*env)->ExceptionClear(env);
+	            break;
+	        }				
+			if (num1 <= 0) {
+				break;
+			} 
+			(*env)->GetByteArrayRegion(env,js_buf, 0, num1,
+												((jbyte*)ptr+num)); 	
+	        if ((*env)->ExceptionCheck(env)) {
+	            (*env)->ExceptionDescribe(env);
+	            (*env)->ExceptionClear(env);
+	            break;
+	        }			
+			num += num1;
+			wanted -= num1;
+		}
+		return num;
+	}
+}
+int js_read(void* ptr,size_t size,size_t count) {
+	int wanted = size * count;
+	int result = js_read_internal(ptr,wanted)/size;
+	if (result == 0) {
+		result = EOF;
+	}
+	return result;
+}
 static void saveJPGFile(const char* filename) {
     char backupName[400];
     struct stat buf;
@@ -410,6 +537,7 @@ static jboolean appendThumbnail(JNIEnv *env, jobject jobj, jstring jfilename, js
      ALOGE("*******before actual call to ReplaceThumbnail\n");
      ShowImageInfo(TRUE);
  #endif
+    pthread_mutex_lock(&jheadMutex);
     ReplaceThumbnail(thumbnailfilename);
  #ifdef SUPERDEBUG
      ShowImageInfo(TRUE);
@@ -418,6 +546,7 @@ static jboolean appendThumbnail(JNIEnv *env, jobject jobj, jstring jfilename, js
     (*env)->ReleaseStringUTFChars(env, jthumbnailfilename, thumbnailfilename);
 
     DiscardData();
+    pthread_mutex_unlock(&jheadMutex);
     return JNI_TRUE;
 }
 
@@ -428,8 +557,10 @@ static void commitChanges(JNIEnv *env, jobject jobj, jstring jfilename)
 #endif
     const char* filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
     if (filename) {
+        pthread_mutex_lock(&jheadMutex);
         saveJPGFile(filename);
         DiscardData();
+        pthread_mutex_unlock(&jheadMutex);
         (*env)->ReleaseStringUTFChars(env, jfilename, filename);
     }
 }
@@ -441,6 +572,7 @@ static jbyteArray getThumbnail(JNIEnv *env, jobject jobj, jstring jfilename)
 #endif
 
     const char* filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+    pthread_mutex_lock(&jheadMutex);
     if (filename) {
         loadExifInfo(filename, FALSE);
         Section_t* ExifSection = FindSection(M_EXIF);
@@ -465,6 +597,7 @@ static jbyteArray getThumbnail(JNIEnv *env, jobject jobj, jstring jfilename)
 #endif
         (*env)->ReleaseStringUTFChars(env, jfilename, filename);
         DiscardData();
+        pthread_mutex_unlock(&jheadMutex);
         return byteArray;
     }
 noThumbnail:
@@ -472,6 +605,7 @@ noThumbnail:
         (*env)->ReleaseStringUTFChars(env, jfilename, filename);
     }
     DiscardData();
+    pthread_mutex_unlock(&jheadMutex);
     return NULL;
 }
 
@@ -538,6 +672,14 @@ static int addKeyValueString(char** buf, int bufLen, const char* key, const char
 }
 
 // returns new buffer length
+static int addKeyValueULong(char** buf, int bufLen, const char* key, unsigned int value) {
+    char valueStr[20];
+    snprintf(valueStr, 20, "%u", value);
+
+    return addKeyValueString(buf, bufLen, key, valueStr);
+}
+
+// returns new buffer length
 static int addKeyValueInt(char** buf, int bufLen, const char* key, int value) {
     char valueStr[20];
     snprintf(valueStr, 20, "%d", value);
@@ -560,17 +702,7 @@ static int addKeyValueRational(char** buf, int bufLen, const char* key, rat_t va
     return addKeyValueString(buf, bufLen, key, valueStr);
 }
 
-static jstring getAttributes(JNIEnv *env, jobject jobj, jstring jfilename)
-{
-#ifdef SUPERDEBUG
-    ALOGE("******************************** getAttributes\n");
-#endif
-    const char* filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
-    loadExifInfo(filename, FALSE);
-#ifdef SUPERDEBUG
-    ShowImageInfo(TRUE);
-#endif
-    (*env)->ReleaseStringUTFChars(env, jfilename, filename);
+static char* composeAttributes() {
 
     attributeCount = 0;
 #ifdef REALLOCTEST
@@ -627,6 +759,26 @@ static jstring getAttributes(JNIEnv *env, jobject jobj, jstring jfilename)
 
     bufLen = addKeyValueInt(&buf, bufLen, "Orientation", ImageInfo.Orientation);
     if (bufLen == 0) return NULL;
+    if(ImageInfo.MTKConshotGroupID){
+       bufLen = addKeyValueULong(&buf, bufLen, "MTKConshotGroupID", ImageInfo.MTKConshotGroupID);
+       if (bufLen == 0) return NULL; 
+    }
+    if(ImageInfo.MTKConshotPicIndex){
+       bufLen = addKeyValueInt(&buf, bufLen, "MTKConshotPicIndex", ImageInfo.MTKConshotPicIndex);
+       if (bufLen == 0) return NULL; 
+    }      
+    if(ImageInfo.MTKConshotFocusHigh){
+       bufLen = addKeyValueULong(&buf, bufLen, "MTKConshotFocusHigh", ImageInfo.MTKConshotFocusHigh);
+       if (bufLen == 0) return NULL; 
+    }
+    if(ImageInfo.MTKConshotFocusLow){
+       bufLen = addKeyValueULong(&buf, bufLen, "MTKConshotFocusLow", ImageInfo.MTKConshotFocusLow);
+       if (bufLen == 0) return NULL; 
+    }      
+    if (ImageInfo.MTKCameraRefocus[0]) {
+        bufLen = addKeyValueString(&buf, bufLen, "MTKCameraRefocus", ImageInfo.MTKCameraRefocus);
+        if (bufLen == 0) return NULL; 
+    }      
 
     if (ImageInfo.FlashUsed >= 0) {
         bufLen = addKeyValueInt(&buf, bufLen, "Flash", ImageInfo.FlashUsed);
@@ -756,21 +908,68 @@ static jstring getAttributes(JNIEnv *env, jobject jobj, jstring jfilename)
         if (!isascii(finalResult[k]))
             finalResult[k] = '?';
     free(buf);
+		return finalResult;
 
+}
+static jstring getAttributesFromStream(JNIEnv *env, jobject jobj,jobject stream,jbyteArray buf)
+{
+#ifdef SUPERDEBUG
+    ALOGE("******************************** getAttributesFromStream\n");
+#endif
+	jpegStream = stream;
+	js_buf = buf;
+	if (js_buf == NULL) {
+		return NULL;
+	}
+	js_valid = (*env)->CallIntMethod(env,jpegStream,streamReadId, js_buf, 0, 1024);
+	if (js_valid <= 0) {
+		return NULL;
+	} 
+	js_pos = 0;
+    pthread_mutex_lock(&jheadMutex);
+	loadExifInfoFromStream(FALSE);
+#ifdef SUPERDEBUG
+	ShowImageInfo(TRUE);
+#endif		
+	char* finalResult = composeAttributes();
 #ifdef SUPERDEBUG
     ALOGE("*********Returning result \"%s\"", finalResult);
 #endif
     jstring result = ((*env)->NewStringUTF(env, finalResult));
     free(finalResult);
     DiscardData();
+    pthread_mutex_unlock(&jheadMutex);
     return result;
 }
 
+static jstring getAttributes(JNIEnv *env, jobject jobj, jstring jfilename)
+{
+#ifdef SUPERDEBUG
+    ALOGE("******************************** getAttributes\n");
+#endif
+    pthread_mutex_lock(&jheadMutex);
+	const char* filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	loadExifInfo(filename, FALSE);
+#ifdef SUPERDEBUG
+	ShowImageInfo(TRUE);
+#endif
+	(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	char* finalResult = composeAttributes();    
+#ifdef SUPERDEBUG
+    ALOGE("*********Returning result \"%s\"", finalResult);
+#endif
+    jstring result = ((*env)->NewStringUTF(env, finalResult));
+    free(finalResult);
+    DiscardData();
+    pthread_mutex_unlock(&jheadMutex);
+    return result;
+}
 static const char *classPathName = "android/media/ExifInterface";
 
 static JNINativeMethod methods[] = {
   {"saveAttributesNative", "(Ljava/lang/String;Ljava/lang/String;)V", (void*)saveAttributes },
   {"getAttributesNative", "(Ljava/lang/String;)Ljava/lang/String;", (void*)getAttributes },
+  {"getAttributesFromStreamNative", "(Ljava/io/InputStream;[B)Ljava/lang/String;", (void*)getAttributesFromStream},  
   {"appendThumbnailNative", "(Ljava/lang/String;Ljava/lang/String;)Z", (void*)appendThumbnail },
   {"commitChangesNative", "(Ljava/lang/String;)V", (void*)commitChanges },
   {"getThumbnailNative", "(Ljava/lang/String;)[B", (void*)getThumbnail },
@@ -831,6 +1030,15 @@ __attribute__ ((visibility("default"))) jint JNI_OnLoad(JavaVM* vm, void* reserv
         goto bail;
     }
 
+	jvm = vm;
+    jclass clazz = (*env)->FindClass(env,"java/io/InputStream");
+    if (clazz == NULL) {
+        fprintf(stderr,
+            "JNI_OnLoad unable to find class java.io.InputStream \n");
+        return JNI_FALSE;
+    }	
+	streamReadId = (*env)->GetMethodID(env,clazz,"read", "([BII)I");
+	streamSkipId = (*env)->GetMethodID(env,clazz,"skip", "(J)J");	
     /* success -- return valid version number */
     result = JNI_VERSION_1_4;
 

@@ -64,7 +64,7 @@ extern int DumpExifMap;
 
 // Buffer size must large enough to hold maximum location string
 // containing six signed integers plus delimeters and terminator,
-// i.e.: 11 * 6 + 3(â€˜/â€™) + 2(â€™,â€™) + 1(\0) = 72
+// i.e.: 11 * 6 + 3(â€?â€? + 2(â€?â€? + 1(\0) = 72
 #define MAX_BUF_SIZE    72
 
 // Sub second tag string length (including null termination character), with
@@ -116,6 +116,11 @@ typedef struct {
     int   ISOequivalent;
     int   LightSource;
     int   DistanceRange;
+    unsigned int MTKConshotGroupID ;
+    unsigned int MTKConshotPicIndex ;
+    unsigned int MTKConshotFocusHigh ;
+    unsigned int MTKConshotFocusLow ;
+    char MTKCameraRefocus[32]; //MTK_CAMEAR_REFOCUS
 
     char  Comments[MAX_COMMENT_SIZE];
     int   CommentWidchars; // If nonzer, widechar comment, indicates number of chars.
@@ -297,3 +302,7 @@ extern char* formatStr(int format);
 #define M_DHT   0xC4
 #define M_DRI   0xDD
 #define M_IPTC  0xED          // IPTC marker
+
+
+typedef int (* CALLBACK_js_getc) ();
+typedef int (* CALLBACK_js_read) (void* ptr,size_t size,size_t count);
